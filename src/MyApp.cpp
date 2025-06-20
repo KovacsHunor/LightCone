@@ -1,7 +1,8 @@
-#include "framework.h"
+#include "../include/framework.h"
 #include <GLFW/glfw3.h>
+#include <iostream>
 
-const char* vertSource = R"(
+const char* vert_source = R"(
 	#version 330				
     uniform mat4 MVP;
 	layout(location = 0) in vec2 vertexPosition;
@@ -13,11 +14,11 @@ const char* vertSource = R"(
 
 const char* fragSource = R"(
 	#version 330
-    uniform vec3 color;
+    uniform vec4 color;
 	out vec4 fragmentColor;
 	
 	void main() {
-		fragmentColor = vec4(color, 1.0f);
+		fragmentColor = color;
 	}
 )";
 
@@ -74,8 +75,8 @@ class Camera {
 template <class T>
 class Object {
    protected:
-	unsigned int vao, vbo[1];
-	vec3 color = vec3(1.0f, 0.0f, 0.0f);
+	unsigned int vao{}, vbo[1];
+	vec4 color = vec4(1.0f, 0.0f, 0.0f, 1.0f);
 	float phi = 0;
 	vec3 scaling = vec3(1, 1, 0), pos = vec3(0, 0, 0);
 
@@ -97,7 +98,7 @@ class Object {
 		glBindVertexArray(vao);
 		glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
 	}
-	void draw(GPUProgram* prog, int type, Camera& camera, std::vector<T> vec) {
+	void draw(GPUProgram* prog, int type, Camera& camera, std::vector<T> vec, vec4 color) {
 		if (vec.size() > 0) {
 			updateGPU(vec);	 // not here
 			mat4 M = translate(pos) * rotate(phi, vec3(0, 0, 1)) * scale(scaling);
@@ -109,6 +110,9 @@ class Object {
 			glDrawArrays(type, 0, (int)vec.size());
 		}
 	}
+	void draw(GPUProgram* prog, int type, Camera& camera, std::vector<T> vec) {
+		draw(prog, type, camera, vec, color);
+	}
 };
 
 float Rad(float deg) {
@@ -119,38 +123,91 @@ float Deg(float rad) {
 	return rad / (2 * M_PI) * 360.0f;
 }
 
-class Spline : public Object<vec2> {
+class Cone : public Object<vec2> {
 	vec2 p;
 	float M;
 
-	float const fid = 1000;
-	float const len = 1.0f / 2.0f * 1.0f;
+	float const fid = 100;
+	float length = 0.5f;
 	std::vector<std::vector<vec2>> vtx;
+	std::vector<vec2> triangle_vtx;
+	Camera* cam;
+	bool relative = false;
 
    public:
-	Spline(float M, vec2 p) : M(M), p(p) {
-		color = vec3(1.0f, 1.0f, 0.0f);
+	Cone(float M, vec2 p, Camera& cam, bool relative = false) : M(M), p(p), cam(&cam), relative(relative){
+		color = vec4(1.0f, 1.0f, 0.0f, 1.0f);
 		for (int i = 0; i < 4; i++) {
 			vtx.push_back(std::vector<vec2>());
 		}
-
-		update();
+		update(relative);
 	}
 
-	void update() {
-		for (int i = 0; i < vtx.size(); i++) {
-			vtx[i].clear();
-			create_segment(vtx[i], i);
+
+	void update(bool relative) {
+		this->relative = relative;
+		clear();
+		if (floatCmp(2 * M, p.x)) {
+			create_horizon_segment();
+		} else {
+			create_plus_segment();
+			create_minus_segment();
+		}
+	}
+	void create_horizon_segment() {
+		vtx[0].push_back(vec2(p.x, p.y - get_len()));
+		vtx[0].push_back(vec2(p.x, p.y + get_len()));
+	}
+
+	void create_plus_segment() {
+		vec2 c = p;
+		vec2 dir;
+		int i;
+		for (i = 0; i < fid; i++) {
+			if (c.x < 0) break;
+			vtx[0].push_back(vec2(c.x, c.y));
+			dir = ((ddt(M, c.x) < 1) ? -1.0f : 1.0f) * normalize(vec2(1.0f, ddt(M, c.x)));
+			c = c + (dir * get_len() / fid);
+		}
+		if (i == fid) {
+			dir *= get_arrow_size();
+			triangle_vtx.push_back(vec2(c.x, c.y) + dir);
+			triangle_vtx.push_back(vec2(c.x, c.y) + vec2(dir.y, -dir.x));
+			triangle_vtx.push_back(vec2(c.x, c.y) + vec2(-dir.y, dir.x));
+		}
+
+		c = p;
+		for (i = 0; i < fid; i++) {
+			if (c.x < 0) break;
+			vtx[1].push_back(vec2(c.x, c.y));
+			dir = ((ddt(M, c.x) < 1) ? -1.0f : 1.0f) * normalize(vec2(1.0f, ddt(M, c.x)));
+			c = c - (dir * get_len() / fid);
 		}
 	}
 
-	void create_segment(std::vector<vec2>& vtx, int ind) {
+	void create_minus_segment() {
 		vec2 c = p;
-		for (int i = 0; i < fid; i++) {
-			if (c.x < 0) return;
-			vtx.push_back(vec2(c.x, c.y));
-			vec2 dir = normalize(vec2(1.0f, (ind % 2 * 2 - 1) * ddt(M, c.x)));
-			c = c + float(ind / 2 % 2 * 2 - 1) * (dir * len / fid);
+		vec2 dir;
+		int i;
+		for (i = 0; i < fid; i++) {
+			if (c.x < 0) break;
+			vtx[2].push_back(vec2(c.x, c.y));
+			dir = ((ddt(M, c.x) < 1) ? 1.0f : 1.0f) * normalize(vec2(-1.0f, ddt(M, c.x)));
+			c = c + (dir * get_len() / fid);
+		}
+		if (i == fid) {
+			dir *= get_arrow_size();
+			triangle_vtx.push_back(vec2(c.x, c.y) + dir);
+			triangle_vtx.push_back(vec2(c.x, c.y) + vec2(dir.y, -dir.x));
+			triangle_vtx.push_back(vec2(c.x, c.y) + vec2(-dir.y, dir.x));
+		}
+
+		c = p;
+		for (i = 0; i < fid; i++) {
+			if (c.x < 0) break;
+			vtx[3].push_back(vec2(c.x, c.y));
+			dir = ((ddt(M, c.x) < 1) ? 1.0f : 1.0f) * normalize(vec2(-1.0f, ddt(M, c.x)));
+			c = c - (dir * get_len() / fid);
 		}
 	}
 
@@ -169,11 +226,35 @@ class Spline : public Object<vec2> {
 		for (int i = 0; i < vtx.size(); i++) {
 			draw(gpuProgram, GL_LINE_STRIP, camera, vtx[i]);
 		}
+		draw(gpuProgram, GL_TRIANGLES, camera, triangle_vtx);
+	}
+
+private:
+	void clear() {
+		for (auto& varr : vtx) {
+		 	varr.clear();
+		}
+		triangle_vtx.clear();
+	}
+
+	float get_len() {
+		if (relative) {
+			return length*cam->get_size()*0.1f;
+		}
+		return length;
+	}
+
+	float get_arrow_size() {
+		return get_len()*0.2f;
 	}
 };
 
 void print_vec(vec2 v) {
 	printf("%f %f\n", v.x, v.y);
+}
+
+size_t get_size_t(std::string& s) {
+	return s.size();
 }
 
 template <class T>
@@ -184,14 +265,16 @@ void swap(T& a, T& b) {
 }
 
 class Grid : Object<vec2> {
-	std::vector<vec2> vtx;
+	std::vector<vec2> vtx_whole;
+	std::vector<vec2> vtx_fractional;
 
    public:
 	Grid() {
-		color = vec3(0.5f, 0.5f, 0.5f);
+		color = vec4(0.5f, 0.5f, 0.5f, 1.0f);
 	}
 	void update(Camera& camera) {
-		vtx.clear();
+		vtx_whole.clear();
+		vtx_fractional.clear();
 
 		vec2 a = camera.convert(0, 0);
 		vec2 b = camera.convert(winWidth, winHeight);
@@ -203,8 +286,12 @@ class Grid : Object<vec2> {
 		if (y1 > y2) swap(y1, y2);
 
 		for (int i = x1; i <= x2 + 1; i++) {
-			vtx.push_back(vec2(i, a.y));
-			vtx.push_back(vec2(i, b.y));
+			vtx_whole.push_back(vec2(i, a.y));
+			vtx_whole.push_back(vec2(i, b.y));
+		}
+		for (float i = x1; i <= x2 + 1; i += 0.5f) {
+			vtx_fractional.push_back(vec2(i, a.y));
+			vtx_fractional.push_back(vec2(i, b.y));
 		}
 		/* t-coordinates
 		for (int i = y1; i <= y2 + 1; i++) {
@@ -217,7 +304,9 @@ class Grid : Object<vec2> {
 	void draw(GPUProgram* gpuProgram, Camera& camera) {
 		update(camera);
 		glLineWidth(1);
-		draw(gpuProgram, GL_LINES, camera, vtx);
+		draw(gpuProgram, GL_LINES, camera, vtx_fractional, vec4(0.1f, 0.1f, 0.1f, 0.0f));
+		glLineWidth(1);
+		draw(gpuProgram, GL_LINES, camera, vtx_whole, vec4(0.5f, 0.5f, 0.5f, 1.0f));
 	}
 };
 
@@ -226,7 +315,7 @@ class Singularity : Object<vec2> {
 
    public:
 	Singularity() {
-		color = vec3(0.25f, 0.5f, 1.0f);
+		color = vec4(0.25f, 0.5f, 1.0f, 1.0f);
 	}
 	void update(Camera& camera) {
 		vtx.clear();
@@ -246,20 +335,29 @@ class Singularity : Object<vec2> {
 
 class Horizon : Object<vec2> {
 	std::vector<vec2> vtx;
+	float top = 0.0f;
+	float bottom = 0.0f;
 
    public:
 	Horizon() {
-		color = vec3(0.25f, 1.0f, 0.5f);
+		color = vec4(0.25f, 1.0f, 0.5f, 1.0f);
 	}
 	void update(Camera& camera, float M) {
 		vtx.clear();
-		vec2 a = camera.convert(0, winHeight);
-		vec2 b = camera.convert(winWidth, 0);
+		vec2 bottom_left = camera.convert(0, winHeight);
+		vec2 top_right = camera.convert(winWidth, 0);
 		float diff = 0.1 * camera.get_size();
-		for (float i = floor(diff * floor(a.y / diff)); i < floor((diff + sign(b.y)) * floor(b.y / diff));
-			 i += diff) {
-			vtx.push_back(vec2(2 * M, i));
-			vtx.push_back(vec2(2 * M, i + diff / 2.0f));
+
+		while (bottom >= bottom_left.y - 1.0f){
+			bottom -= diff;
+		}
+		while (top <= top_right.y + 1.0f){
+			top += diff;
+		}
+
+		for (float i = bottom; i < top; i += diff) {
+		 	vtx.push_back(vec2(2 * M, i));
+		 	vtx.push_back(vec2(2 * M, i + diff / 2.0f));
 		}
 	}
 
@@ -270,14 +368,21 @@ class Horizon : Object<vec2> {
 	}
 };
 
+enum MODE {
+	PUT,
+	FOLLOW
+};
+
 class Scene {
-	std::vector<Spline> splines;
+	std::vector<Cone> cones;
 	GPUProgram* gpuProgram;
 	Camera* camera;
 	Grid grid;
-	Singularity sing;
+	Singularity singularity;
 	Horizon hor;
 	float M = 1;
+	vec2 mouse_pos;
+	bool is_cone_size_dynamic = false;
 
    public:
 	Scene(GPUProgram* GPUProgram, Camera* camera) : gpuProgram(GPUProgram), camera(camera) {
@@ -294,22 +399,43 @@ class Scene {
 		add_spline(vec2(4 * M, 0.0f));
 	}
 	void add_spline(vec2 p) {
-		splines.push_back(Spline(M, p));
+		cones.push_back(Cone(M, p, *camera));
 	}
 	void draw_cones() {
-		for (auto& i : splines) {
+		for (auto& i : cones) {
 			i.draw(gpuProgram, *camera);
 		}
 	}
-	void draw() {
+	void draw_cone() {
+		Cone c = Cone(M, mouse_pos, *camera, is_cone_size_dynamic);
+		c.draw(gpuProgram, *camera);
+	}
+	void draw(MODE mode) {
+
 		grid.update(*camera);
-		sing.update(*camera);
+		singularity.update(*camera);
 		hor.update(*camera, M);
+		for (auto& cone : cones) {
+			cone.update(is_cone_size_dynamic);
+		}
 
 		grid.draw(gpuProgram, *camera);
-		sing.draw(gpuProgram, *camera);
+		singularity.draw(gpuProgram, *camera);
 		hor.draw(gpuProgram, *camera);
 		draw_cones();
+		if (mode == FOLLOW) {
+			draw_cone();
+		}
+	}
+	void set_mouse_pos(vec2 p) {
+		mouse_pos = p;
+	}
+	void clear() {
+		cones.clear();
+	}
+
+	void switch_dynamic() {
+		is_cone_size_dynamic = !is_cone_size_dynamic;
 	}
 };
 
@@ -320,7 +446,7 @@ class MyApp : public glApp {
 	float lastTime = 0.0f;
 	bool pressed = false;
 	vec2 pressedPos;
-
+	enum MODE mode = PUT;
 	vec2 size = vec2(10, 10);
 	Camera camera = Camera(vec2(size.x / 2.0f, 0), size);
 
@@ -328,7 +454,7 @@ class MyApp : public glApp {
 	MyApp() : glApp("") {}
 
 	void onInitialization() override {
-		gpuProgram = new GPUProgram(vertSource, fragSource);
+		gpuProgram = new GPUProgram(vert_source, fragSource);
 		scene = new Scene(gpuProgram, &camera);
 	}
 
@@ -336,9 +462,9 @@ class MyApp : public glApp {
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
 
-		// multipliers in order to make it work properly on 2560*1440 screen
+		// multipliers to make it work properly on 2560*1440 screens
 		glViewport(0, 0, winWidth * 2, winHeight * 2);
-		scene->draw();
+		scene->draw(mode);
 	}
 	void onTimeElapsed(float startTime, float endTime) {
 		// refreshScreen();
@@ -363,10 +489,13 @@ class MyApp : public glApp {
 	}
 
 	void onMouseMotion(int pX, int pY) {
+		scene->set_mouse_pos(camera.convert(pX, pY));
 		if (pressed) {
 			vec2 p = camera.convert(pX, pY);
 			vec2 v = pressedPos - p;
 			camera.addOrigo(v);
+		}
+		if (pressed || mode == FOLLOW) {
 			refreshScreen();
 		}
 	}
@@ -378,14 +507,19 @@ class MyApp : public glApp {
 		refreshScreen();
 	}
 
-	virtual void onKeyboard(int key) override {
+	void onKeyboard(int key) override {
 		switch (key) {
-			case 'x':
+			case 'm':
+				mode = (mode == PUT) ? FOLLOW : PUT;
+				break;
+			case 't':
+				scene->task();
 				break;
 			case 'c':
+				scene->clear();
 				break;
-			case 'n':
-				break;
+			case 'r':
+				scene->switch_dynamic();
 			default:
 				break;
 		}
